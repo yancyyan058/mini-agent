@@ -1,0 +1,55 @@
+import type { Context, AssistantMessage } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
+
+import { runTool } from "./tools";
+import { inaiModel, apiKey } from "./ai";
+const models = inaiModel;
+
+export class Agent {
+    // loop
+    async runAgentLoop(context: Context): Promise<any> {
+        let count = 0;
+        while (true) {
+            count++;
+            // 开始调用模型拿到结果
+            const response: AssistantMessage = await streamSimple(models, context, {
+                apiKey: apiKey,
+            }).result();
+            // 出错: 抛给 session 层处理, 保留 context 继续对话, 而不是杀掉整个会话
+            if (response.stopReason == "error" || response.stopReason == "aborted") {
+                throw new Error(response.errorMessage ?? "模型调用出错");
+            };
+
+            // 没出错再把结果放到上下文中
+            context.messages.push(response);
+
+            // 如果不是工具调用, 则退出loop
+            if (response.stopReason == "stop") {
+                const text = response.content
+                    .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+                    .map((b) => b.text)
+                    .join("\n");
+                return text;
+            };
+
+            // 处理工具调用
+            response.content.forEach((item) => {
+                if (item.type == "toolCall") {
+                    const toolName = item.name;
+                    const toolArgs = item.arguments;
+                    console.log(`Tool Call: ${toolName}(${JSON.stringify(toolArgs)})`);
+                    const toolResult = runTool(toolName, toolArgs);
+                    context.messages.push({
+                        role: "toolResult",
+                        toolCallId: item.id,
+                        toolName: toolName,
+                        content: [{ type: "text", text: toolResult }],
+                        isError: false,
+                        timestamp: Date.now(),
+                    });
+                }
+            });
+            // console.dir(context.messages, { depth: null });
+        }
+    }
+}
